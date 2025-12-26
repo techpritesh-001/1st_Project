@@ -1,0 +1,118 @@
+// Utility helpers
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+function bufToBase64(buf) {
+  return btoa(String.fromCharCode(...new Uint8Array(buf)));
+}
+function base64ToBuf(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+async function deriveKeyFromPassword(password) {
+  const salt = enc.encode("fixed-demo-salt"); // demo only
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(password),
+    "PBKDF2",
+    false,
+    ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt,
+      iterations: 100000,
+      hash: "SHA-256",
+    },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+async function aesEncryptOnce(key, dataBuf) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    dataBuf
+  );
+  const out = new Uint8Array(iv.byteLength + ct.byteLength);
+  out.set(iv, 0);
+  out.set(new Uint8Array(ct), iv.byteLength);
+  return out.buffer;
+}
+
+async function aesDecryptOnce(key, combinedBuf) {
+  const combined = new Uint8Array(combinedBuf);
+  const iv = combined.slice(0, 12);
+  const ct = combined.slice(12);
+  return crypto.subtle.decrypt(
+    { name: "AES-GCM", iv },
+    key,
+    ct
+  );
+}
+
+// 3‑layer encrypt
+async function encryptThreeLayers(plainText, k1, k2, k3) {
+  const key1 = await deriveKeyFromPassword(k1);
+  const key2 = await deriveKeyFromPassword(k2);
+  const key3 = await deriveKeyFromPassword(k3);
+
+  const layer1 = await aesEncryptOnce(key1, enc.encode(plainText));
+  const layer2 = await aesEncryptOnce(key2, layer1);
+  const layer3 = await aesEncryptOnce(key3, layer2);
+
+  return bufToBase64(layer3);
+}
+
+// 3‑layer decrypt
+async function decryptThreeLayers(cipherB64, k1, k2, k3) {
+  const key1 = await deriveKeyFromPassword(k1);
+  const key2 = await deriveKeyFromPassword(k2);
+  const key3 = await deriveKeyFromPassword(k3);
+
+  const layer3 = base64ToBuf(cipherB64);
+  const layer2 = await aesDecryptOnce(key3, layer3);
+  const layer1 = await aesDecryptOnce(key2, layer2);
+  const plainBuf = await aesDecryptOnce(key1, layer1);
+
+  return dec.decode(plainBuf);
+}
+
+// Wire up buttons
+document.getElementById("encryptBtn").onclick = async () => {
+  const text = document.getElementById("plain").value;
+  const k1 = document.getElementById("k1").value;
+  const k2 = document.getElementById("k2").value;
+  const k3 = document.getElementById("k3").value;
+  if (!text || !k1 || !k2 || !k3) {
+    alert("Enter text and all three keys.");
+    return;
+  }
+  const encText = await encryptThreeLayers(text, k1, k2, k3);
+  document.getElementById("encrypted").value = encText;
+};
+
+document.getElementById("decryptBtn").onclick = async () => {
+  const cipher = document.getElementById("encrypted").value;
+  const k1 = document.getElementById("k1").value;
+  const k2 = document.getElementById("k2").value;
+  const k3 = document.getElementById("k3").value;
+  if (!cipher || !k1 || !k2 || !k3) {
+    alert("Enter ciphertext and all three keys.");
+    return;
+  }
+  try {
+    const plain = await decryptThreeLayers(cipher, k1, k2, k3);
+    document.getElementById("plain").value = plain;
+  } catch (e) {
+    alert("Decryption failed. Check keys or data.");
+  }
+};
